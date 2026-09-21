@@ -207,6 +207,44 @@ describe("counter interval ratios", () => {
   });
 });
 
+describe("vLLM extended cache and spec-decode counters", () => {
+  /*
+   * The newer vLLM builds expose a per-position speculative-decode counter and
+   * a per-request prefix-cache hit pair. The positions are keyed by a label, so
+   * the value that comes back is a map, not a scalar — and routing a map through
+   * the scalar setter (which tests Number.isFinite) drops it silently. That is
+   * the regression this pins.
+   */
+  const body = `vllm:num_requests_running 1
+vllm:spec_decode_num_accepted_tokens_per_pos_total{position="0"} 100
+vllm:spec_decode_num_accepted_tokens_per_pos_total{position="1"} 60
+vllm:spec_decode_num_accepted_tokens_per_pos_total{position="2"} 30
+vllm:mm_cache_hits_total 377
+vllm:mm_cache_queries_total 430
+vllm:prefix_cache_hits_total 900
+vllm:prefix_cache_queries_total 1000`;
+
+  test("keeps the per-position acceptance map rather than dropping it", () => {
+    const r = readMetrics(body)!;
+    expect(r.specAcceptedPerPosTotal).toEqual({ 0: 100, 1: 60, 2: 30 });
+  });
+
+  test("reads the per-request prefix and multimodal cache counters", () => {
+    const r = readMetrics(body)!;
+    expect(r.prefixCacheHitsTotal).toBe(900);
+    expect(r.prefixCacheQueriesTotal).toBe(1000);
+    expect(r.mmCacheHitsTotal).toBe(377);
+    expect(r.mmCacheQueriesTotal).toBe(430);
+  });
+
+  test("leaves the new fields absent on an engine that does not report them", () => {
+    const r = readMetrics(`llamacpp:requests_processing 1`)!;
+    expect(r.specAcceptedPerPosTotal).toBeUndefined();
+    expect(r.prefixCacheHitsTotal).toBeUndefined();
+    expect(r.mmCacheHitsTotal).toBeUndefined();
+  });
+});
+
 describe("token accounting across engines", () => {
   /*
    * The token chart is engine-neutral, so every supported engine has to yield

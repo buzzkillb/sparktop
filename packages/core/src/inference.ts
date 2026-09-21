@@ -74,7 +74,25 @@ export interface EngineSpec {
    * token at a time. Sampling that over a short window swings wildly, and the
    * acceptance rate is what actually governs the speed-up.
    */
-  specDecode: { accepted: string[]; drafted: string[]; drafts: string[] };
+  specDecode: { accepted: string[]; drafted: string[]; drafts: string[]; perPos: string[] };
+  /**
+   * Multimodal (image) cache counters. A vision model re-encodes images on
+   * every request unless the encoder output is cached; a high hit rate means
+   * repeated images are not being re-encoded.
+   */
+  mmCache: { hits: string[]; queries: string[] };
+  /**
+   * Prefix-cache hit/miss counters. The newer vLLM pair reports the true
+   * per-request hit rate (hits / queries), as opposed to the token-share
+   * counter, which is a cumulative share of prompt tokens.
+   */
+  prefixCache: { hits: string[]; queries: string[] };
+  /** Estimated FLOPs the GPU performed, cumulative. */
+  estimatedFlops: string[];
+  /** Estimated bytes read from memory, cumulative. */
+  estimatedReadBytes: string[];
+  /** Estimated bytes written to memory, cumulative. */
+  estimatedWriteBytes: string[];
 }
 
 /**
@@ -110,7 +128,19 @@ export const ENGINE_SPECS: EngineSpec[] = [
       accepted: ["vllm:spec_decode_num_accepted_tokens_total"],
       drafted: ["vllm:spec_decode_num_draft_tokens_total"],
       drafts: ["vllm:spec_decode_num_drafts_total"],
+      perPos: ["vllm:spec_decode_num_accepted_tokens_per_pos_total"],
     },
+    mmCache: {
+      hits: ["vllm:mm_cache_hits_total"],
+      queries: ["vllm:mm_cache_queries_total"],
+    },
+    prefixCache: {
+      hits: ["vllm:prefix_cache_hits_total"],
+      queries: ["vllm:prefix_cache_queries_total"],
+    },
+    estimatedFlops: ["vllm:estimated_flops_per_gpu_total"],
+    estimatedReadBytes: ["vllm:estimated_read_bytes_per_gpu_total"],
+    estimatedWriteBytes: ["vllm:estimated_write_bytes_per_gpu_total"],
   },
   {
     id: "sglang",
@@ -137,7 +167,13 @@ export const ENGINE_SPECS: EngineSpec[] = [
       accepted: ["sglang:spec_accept_length"],
       drafted: [],
       drafts: [],
+      perPos: [],
     },
+    mmCache: { hits: [], queries: [] },
+    prefixCache: { hits: [], queries: [] },
+    estimatedFlops: [],
+    estimatedReadBytes: [],
+    estimatedWriteBytes: [],
   },
   {
     id: "llamacpp",
@@ -159,7 +195,12 @@ export const ENGINE_SPECS: EngineSpec[] = [
       decode: [],
     },
     cachedPromptTokens: [],
-    specDecode: { accepted: [], drafted: [], drafts: [] },
+    specDecode: { accepted: [], drafted: [], drafts: [], perPos: [] },
+    mmCache: { hits: [], queries: [] },
+    prefixCache: { hits: [], queries: [] },
+    estimatedFlops: [],
+    estimatedReadBytes: [],
+    estimatedWriteBytes: [],
   },
   {
     id: "tgi",
@@ -181,7 +222,12 @@ export const ENGINE_SPECS: EngineSpec[] = [
       decode: [],
     },
     cachedPromptTokens: [],
-    specDecode: { accepted: [], drafted: [], drafts: [] },
+    specDecode: { accepted: [], drafted: [], drafts: [], perPos: [] },
+    mmCache: { hits: [], queries: [] },
+    prefixCache: { hits: [], queries: [] },
+    estimatedFlops: [],
+    estimatedReadBytes: [],
+    estimatedWriteBytes: [],
   },
   {
     id: "triton",
@@ -203,7 +249,12 @@ export const ENGINE_SPECS: EngineSpec[] = [
       decode: [],
     },
     cachedPromptTokens: [],
-    specDecode: { accepted: [], drafted: [], drafts: [] },
+    specDecode: { accepted: [], drafted: [], drafts: [], perPos: [] },
+    mmCache: { hits: [], queries: [] },
+    prefixCache: { hits: [], queries: [] },
+    estimatedFlops: [],
+    estimatedReadBytes: [],
+    estimatedWriteBytes: [],
   },
 ];
 
@@ -281,6 +332,31 @@ function maxMetric(samples: Map<string, PromSample[]>, names: string[]): number 
   return undefined;
 }
 
+/**
+ * Sum a metric grouped by a label value (e.g. `position`), returning a map of
+ * label value → sum. Used for per-position speculative decoding counters, where
+ * each draft position has its own counter.
+ */
+function sumMetricByLabel(
+  samples: Map<string, PromSample[]>,
+  names: string[],
+  label: string,
+): Record<number, number> | undefined {
+  const out: Record<number, number> = {};
+  let seen = false;
+  for (const n of names) {
+    for (const s of samples.get(n) ?? []) {
+      const v = s.labels[label];
+      if (v === undefined) continue;
+      const key = Number(v);
+      if (!Number.isFinite(key)) continue;
+      out[key] = (out[key] ?? 0) + s.value;
+      seen = true;
+    }
+  }
+  return seen ? out : undefined;
+}
+
 export function detectEngine(metricsText: string): EngineSpec | null {
   return ENGINE_SPECS.find((s) => s.signature.test(metricsText)) ?? null;
 }
@@ -320,6 +396,23 @@ export interface EngineReading {
   specAcceptedTotal?: number;
   specDraftedTotal?: number;
   specDraftsTotal?: number;
+  /**
+   * Speculative decoding accepted tokens per draft position, when the engine
+   * reports them. Keyed by position index (0, 1, 2, ...). The per-position
+   * acceptance rate is accepted_at_pos / total drafted tokens, which shows
+   * whether the later draft positions are worth keeping.
+   */
+  specAcceptedPerPosTotal?: Record<number, number>;
+  /** Multimodal (image) cache counters, when the engine reports them. */
+  mmCacheHitsTotal?: number;
+  mmCacheQueriesTotal?: number;
+  /** Prefix-cache hit/miss counters, when the engine reports them. */
+  prefixCacheHitsTotal?: number;
+  prefixCacheQueriesTotal?: number;
+  /** Estimated GPU FLOPs and memory traffic, cumulative. */
+  estimatedFlopsTotal?: number;
+  estimatedReadBytesTotal?: number;
+  estimatedWriteBytesTotal?: number;
   kvCachePct?: number;
   /** Raw histogram totals, for deriving interval means against a prior scrape. */
   latency: Partial<Record<LatencyKey, HistogramTotals>>;
@@ -420,6 +513,18 @@ export function readMetrics(metricsText: string): EngineReading | null {
   set("specAcceptedTotal", sumMetric(samples, spec.specDecode.accepted));
   set("specDraftedTotal", sumMetric(samples, spec.specDecode.drafted));
   set("specDraftsTotal", sumMetric(samples, spec.specDecode.drafts));
+  const perPos = sumMetricByLabel(samples, spec.specDecode.perPos, "position");
+  // Assigned directly rather than through `set`: the shared guard tests
+  // Number.isFinite, which is false for the map this value actually is, so
+  // routing it through `set` would silently drop it on every scrape.
+  if (perPos) reading.specAcceptedPerPosTotal = perPos;
+  set("mmCacheHitsTotal", sumMetric(samples, spec.mmCache.hits));
+  set("mmCacheQueriesTotal", sumMetric(samples, spec.mmCache.queries));
+  set("prefixCacheHitsTotal", sumMetric(samples, spec.prefixCache.hits));
+  set("prefixCacheQueriesTotal", sumMetric(samples, spec.prefixCache.queries));
+  set("estimatedFlopsTotal", sumMetric(samples, spec.estimatedFlops));
+  set("estimatedReadBytesTotal", sumMetric(samples, spec.estimatedReadBytes));
+  set("estimatedWriteBytesTotal", sumMetric(samples, spec.estimatedWriteBytes));
   if (kv !== undefined) {
     // Engines report either a 0-1 ratio or an already-scaled percentage.
     set("kvCachePct", kv <= 1.0001 ? kv * spec.kvCacheScale : kv);
