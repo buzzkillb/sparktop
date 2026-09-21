@@ -359,8 +359,9 @@ export interface InferenceEndpoint {
 
   /**
    * Speculative decoding acceptance rate per draft position, when the engine
-   * reports it. Each value is accepted_at_pos / total drafted tokens over the
-   * window. A weak later position suggests dropping num_speculative_tokens.
+   * reports it. Each value is accepted_at_pos / draft steps over the window,
+   * i.e. the share of that position's draft opportunities the target accepted.
+   * A weak later position suggests dropping num_speculative_tokens.
    */
   specPerPosAcceptPct: (number | null)[] | null;
   /** Multimodal (image) cache hit rate over the window, 0-100. */

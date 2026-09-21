@@ -601,7 +601,7 @@ function EndpointRow({ e }: { e: InferenceEndpoint }) {
               <span
                 key={i}
                 className="cursor-help"
-                title={`Position ${i}: share of drafted tokens at this position the target model accepted. A drop here means later draft positions cost more than they return.`}
+                title={`Position ${i}: share of draft attempts at this position the target model accepted. A drop here means later draft positions cost more than they return.`}
               >
                 <Meter value={p ?? 0} tone={utilTone(p ?? 0)} className="w-12" />
                 <span className="tnum mt-0.5 block text-[10px] text-ink-secondary">

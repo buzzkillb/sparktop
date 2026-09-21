@@ -22,6 +22,7 @@ import {
   readMetrics,
   readOllama,
   readOpenAiModels,
+  specPosAcceptInterval,
   type EngineReading,
   type LatencyKey,
 } from "./inference.ts";
@@ -758,27 +759,18 @@ export class NodeCollector extends EventEmitter {
       const mmCacheRatio = ratio("mmHits", "mmQueries", reading.mmCacheHitsTotal, reading.mmCacheQueriesTotal);
       const prefixCacheRatio = ratio("pcHits", "pcQueries", reading.prefixCacheHitsTotal, reading.prefixCacheQueriesTotal);
 
-      // Per-position speculative acceptance: each draft position's accepted
-      // tokens over the window, divided by total drafted tokens. The denominator
-      // is the same for every position, so a weak later position shows up as a
-      // low ratio even though the overall rate looks healthy.
-      const perPosAccept: (number | null)[] | null = (() => {
-        const nowPos = reading.specAcceptedPerPosTotal;
-        const basePos = base?.specPerPos;
-        if (!nowPos || !basePos) return null;
-        const draftedDelta =
-          (reading.specDraftedTotal ?? 0) - (base?.specDrafted ?? 0);
-        if (draftedDelta <= 0) return null;
-        const keys = Object.keys(nowPos)
-          .map(Number)
-          .sort((a, b) => a - b);
-        if (!keys.length) return null;
-        return keys.map((k) => {
-          const delta = (nowPos[k] ?? 0) - (basePos[k] ?? 0);
-          if (delta < 0) return null;
-          return Math.round((delta / draftedDelta) * 1000) / 10;
-        });
-      })();
+      /*
+       * Per-position speculative acceptance: each draft position's accepted
+       * tokens over the window, divided by the draft steps in the same window.
+       * A weak later position shows up as a low rate even though the overall
+       * rate looks healthy.
+       */
+      const perPosAccept = specPosAcceptInterval(
+        base?.specPerPos,
+        reading.specAcceptedPerPosTotal,
+        base?.specDrafts,
+        reading.specDraftsTotal
+      );
 
       const flopsRate = rate(base?.flops, reading.estimatedFlopsTotal, base?.t);
       const readBytesRate = rate(base?.readBytes, reading.estimatedReadBytesTotal, base?.t);

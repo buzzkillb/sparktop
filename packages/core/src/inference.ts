@@ -399,8 +399,10 @@ export interface EngineReading {
   /**
    * Speculative decoding accepted tokens per draft position, when the engine
    * reports them. Keyed by position index (0, 1, 2, ...). The per-position
-   * acceptance rate is accepted_at_pos / total drafted tokens, which shows
-   * whether the later draft positions are worth keeping.
+   * acceptance rate is accepted_at_pos / draft steps — each draft step emits one
+   * token at every position, so the step count is that position's opportunity
+   * count. Dividing by drafted tokens (steps × num_speculative_tokens) would
+   * understate every position by that factor.
    */
   specAcceptedPerPosTotal?: Record<number, number>;
   /** Multimodal (image) cache counters, when the engine reports them. */
@@ -454,6 +456,43 @@ export function counterIntervalRatio(
     return (nowNum - baseNum) / (nowDen - baseDen);
   }
   return nowDen > 0 ? nowNum / nowDen : null;
+}
+
+/**
+ * Per-position speculative-decode acceptance rates over the interval between
+ * two scrapes, as percentages, ordered by draft position.
+ *
+ * Each draft step proposes exactly one token at every position, so the number of
+ * draft *steps* in the window is the number of opportunities every position had.
+ * Dividing a position's accepted tokens by that step count gives the acceptance
+ * rate for the position. The denominator must not be the drafted *token* count
+ * (steps × num_speculative_tokens): doing so understates every position by the
+ * speculative-token count, which turns a 75% first position into 25%.
+ *
+ * Position keys are taken from the current reading and compared against the same
+ * key in the baseline; a position that only appeared after the baseline starts
+ * from zero. Returns null when there is no baseline, no position data, or no
+ * drafts happened in the window, since any of those leaves the rate undefined.
+ */
+export function specPosAcceptInterval(
+  basePos: Record<number, number> | undefined,
+  nowPos: Record<number, number> | undefined,
+  baseDrafts: number | undefined,
+  nowDrafts: number | undefined
+): (number | null)[] | null {
+  if (!nowPos || !basePos) return null;
+  if (nowDrafts === undefined) return null;
+  const draftsDelta = nowDrafts - (baseDrafts ?? 0);
+  if (draftsDelta <= 0) return null;
+  const keys = Object.keys(nowPos)
+    .map(Number)
+    .sort((a, b) => a - b);
+  if (!keys.length) return null;
+  return keys.map((k) => {
+    const delta = (nowPos[k] ?? 0) - (basePos[k] ?? 0);
+    if (delta < 0) return null;
+    return Math.round((delta / draftsDelta) * 1000) / 10;
+  });
 }
 
 /**
