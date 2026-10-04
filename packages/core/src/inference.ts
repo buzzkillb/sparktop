@@ -17,6 +17,7 @@
 export type EngineId =
   | "vllm"
   | "sglang"
+  | "tensorfold"
   | "llamacpp"
   | "tgi"
   | "triton"
